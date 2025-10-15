@@ -63,3 +63,19 @@ export interface Settlement {
   createdAt: Date;
   updatedAt: Date;
 }
+
+// Global error typing helpers
+export type AppError = { message: string } | Error | unknown;
+
+export function toErrorMessage(error: AppError): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  try {
+    // Handle common API error shapes
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const maybe = error as any;
+    if (maybe?.error && typeof maybe.error === 'string') return maybe.error;
+    if (maybe?.message && typeof maybe.message === 'string') return maybe.message;
+  } catch {}
+  return 'Unexpected error';
+}

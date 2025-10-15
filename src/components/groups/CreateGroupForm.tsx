@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -8,14 +8,28 @@ import { apiFetch } from "@/lib/apiClient";
 
 const schema = z.object({
   name: z.string().min(1, "Name is required").max(100),
+  memberIds: z.array(z.string().uuid()).default([]),
 });
 
 type FormValues = z.infer<typeof schema>;
+type AppUser = { id: string; name: string | null; email: string | null };
 
 export default function CreateGroupForm({ onCreated }: { onCreated?: () => void }) {
   const { register, handleSubmit, formState: { errors }, reset } = useForm<FormValues>({ resolver: zodResolver(schema) });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [allUsers, setAllUsers] = useState<AppUser[]>([]);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const data = await apiFetch<{ users: AppUser[] }>("/api/users");
+        if (mounted) setAllUsers(data.users || []);
+      } catch {}
+    })();
+    return () => { mounted = false; };
+  }, []);
 
   async function onSubmit(values: FormValues) {
     setSubmitting(true);
@@ -47,6 +61,19 @@ export default function CreateGroupForm({ onCreated }: { onCreated?: () => void 
           className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
         />
         {errors.name && <p className="mt-1 text-sm text-red-600">{errors.name.message}</p>}
+      </div>
+      <div>
+        <label className="block text-sm font-medium text-gray-700">Add members</label>
+        <select
+          multiple
+          {...register("memberIds")}
+          className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 h-40"
+        >
+          {allUsers.map((u) => (
+            <option key={u.id} value={u.id}>{u.name ?? u.email ?? u.id}</option>
+          ))}
+        </select>
+        <p className="mt-1 text-xs text-gray-500">Hold Ctrl/Cmd to select multiple users. You will be added automatically.</p>
       </div>
       {error && <p className="text-sm text-red-600">{error}</p>}
       <button

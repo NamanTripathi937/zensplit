@@ -2,20 +2,37 @@ import { supabase } from "@/lib/supabase";
 
 type ApiInit = RequestInit & { json?: unknown };
 
+async function getAccessTokenWithRetry(maxWaitMs = 1500, intervalMs = 150): Promise<string | null> {
+  const deadline = Date.now() + maxWaitMs;
+  // First attempt
+  let { data } = await supabase.auth.getSession();
+  if (data.session?.access_token) return data.session.access_token;
+  // Poll briefly for session warm-up on cold starts
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    ({ data } = await supabase.auth.getSession());
+    if (data.session?.access_token) return data.session.access_token;
+  }
+  return null;
+}
+
 export async function apiFetch<T = unknown>(input: string, init: ApiInit = {}): Promise<T> {
   const { data } = await supabase.auth.getSession();
-  const token = data.session?.access_token;
+  let token = data.session?.access_token;
+  if (!token) {
+    token = await getAccessTokenWithRetry();
+  }
 
   const headers = new Headers(init.headers as HeadersInit | undefined);
   if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  else console.warn("apiFetch: no access token found; request may be unauthorized");
+  else throw new Error("Unauthorized");
 
   const body = init.json !== undefined
     ? JSON.stringify(init.json)
     : init.body;
 
-  const res = await fetch(input, { ...init, headers, body });
+  const res = await fetch(input, { ...init, headers, body, cache: init.cache ?? "no-store" });
   if (!res.ok) {
     let message = `Request failed (${res.status})`;
     try {

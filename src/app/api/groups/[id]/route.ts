@@ -1,91 +1,74 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db/client";
-import { groups, groupMembers } from "@/db/schema";
-import { eq, desc } from "drizzle-orm";
-import { z } from "zod";
-import { getAuthenticatedUser } from "@/lib/auth"; 
+import { groups, groupMembers, users } from "@/db/schema";
+import { and, eq } from "drizzle-orm";
+import { getAuthenticatedUser } from "@/lib/auth";
 
-const createGroupBody = z.object({
-  name: z.string().min(1).max(100)
-});
-
-export async function GET(req: Request) {
+type Params = { id: string };
+export async function GET(req: Request, ctx: { params: Params | Promise<Params> }) {
   try {
-    const hasAuth = !!(req.headers.get("authorization") || req.headers.get("Authorization"));
-    console.log("[api/groups/[id]] authorization header present:", hasAuth);
+    // Support Next.js async params (if provided as a Promise)
+    const p = ctx.params as Params | Promise<Params>;
+    const resolvedParams: Params = typeof (p as Promise<Params>).then === "function" ? await (p as Promise<Params>) : (p as Params);
+    const groupId = resolvedParams?.id;
+    console.log("this is thegroupId", groupId);
+    if (!groupId || typeof groupId !== "string") {
+      return NextResponse.json({ error: "Invalid group id" }, { status: 400 });
+    }
+
+    // Authenticate requester
+    console.log("req hai ye wala naya naya req ", req);
     const user = await getAuthenticatedUser(req);
-    console.log("[api/groups/[id]] user found:", !!user);
+    console.log("user hai ye wala naya naya ", user);
     if (!user) {
+      console.warn("GET /api/groups/[id] — unauthenticated request");
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Get only groups where user is a member
-    const userGroups = await db
-      .select({
-        id: groups.id,
-        name: groups.name,
-        createdAt: groups.createdAt,
-      })
+    // Ensure group exists
+    const [group] = await db
+      .select({ id: groups.id, name: groups.name })
       .from(groups)
-      .innerJoin(groupMembers, eq(groups.id, groupMembers.groupId))
-      .where(eq(groupMembers.userId, user.id)) //to add the logged in user to the group
-      .orderBy(desc(groups.createdAt));
+      .where(eq(groups.id, groupId))
+      .limit(1);
 
-    return NextResponse.json({ groups: userGroups });
+    if (!group) {
+      return NextResponse.json({ error: "Group not found " }, { status: 404 });
+    }
+
+    // Efficient membership check: does this user belong to the group?
+    const [memberRow] = await db
+      .select({ userId: groupMembers.userId })
+      .from(groupMembers)
+      .where(and(eq(groupMembers.groupId, groupId), eq(groupMembers.userId, user.id)))
+      .limit(1);
+
+    if (!memberRow) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
+    // Load all members of the group joined with user info
+    const rows = await db
+      .select({
+        userId: groupMembers.userId,
+        name: users.name,
+        email: users.email,
+      })
+      .from(groupMembers)
+      .innerJoin(users, eq(groupMembers.userId, users.id))
+      .where(eq(groupMembers.groupId, groupId));
+
+    // sanitize output a bit
+    const members = rows.map((r) => ({
+      userId: r.userId,
+      name: r.name ?? null,
+      email: r.email ?? null,
+    }));
+
+    return NextResponse.json("I am naman");
   } catch (error) {
-    console.error("GET /api/groups error:", error);
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
-  }
-}
-
-export async function POST(req: Request) {
-  try {
-    // 1. Authenticate user properly
-    const hasAuth = !!(req.headers.get("authorization") || req.headers.get("Authorization"));
-    console.log("[api/groups/[id]:POST] authorization header present:", hasAuth);
-    const user = await getAuthenticatedUser(req);
-    console.log("[api/groups/[id]:POST] user found:", !!user);
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    // 2. Validate request body
-    const json = await req.json().catch(() => null);
-    if (!json) {
-      return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-    }
-
-    const parsed = createGroupBody.safeParse(json);
-    if (!parsed.success) {
-      return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
-    }
-
-    // 3. Use transaction for atomic operations
-    const result = await db.transaction(async (tx) => {
-      // Create group
-      const [group] = await tx
-        .insert(groups)
-        .values({
-          name: parsed.data.name,
-          createdBy: user.id,
-        })
-        .returning();
-
-      // Add creator as group member
-      await tx
-        .insert(groupMembers)
-        .values({
-          groupId: group.id,
-          userId: user.id,
-        });
-
-      return group;
-    });
-
-    return NextResponse.json({ group: result }, { status: 201 });
-    
-  } catch (error) {
-    console.error("POST /api/groups error:", error);
+    console.error("GET /api/groups/[id] error:", error);
+    // return basic error to client; keep details in server logs
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

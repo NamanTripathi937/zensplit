@@ -23,8 +23,9 @@ export default function LoginPage() {
       });
       if (signInError) throw signInError;
       setMessage("Check your email for the login link.");
-    } catch (err: any) {
-      setError(err.message ?? "Failed to send magic link");
+    } catch (err) {
+      const { toErrorMessage } = await import("@/types");
+      setError(toErrorMessage(err));
     } finally {
       setLoading(false);
     }

@@ -1,21 +1,70 @@
-import { cookies } from "next/headers";
+import { cookies as nextCookies } from "next/headers";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type User } from "@supabase/supabase-js";
 import { db } from "@/db/client";
 import { users } from "@/db/schema";
 import { eq } from "drizzle-orm";
 
 type AppUser = typeof users.$inferSelect;
+async function findOrCreateAppUser(supabaseUser: User | null): Promise<AppUser | null> {
+  if (!supabaseUser) return null;
+  // console.log("supabaseUser provided to findOrCreateAppUser:", supabaseUser);
+
+  const existing = await db
+    .select()
+    .from(users)
+    .where(eq(users.supabaseUid, supabaseUser.id))
+    .limit(1);
+  // console.log("existing users:", existing);
+  if (existing.length > 0) return existing[0];
+
+  const displayName =
+    (supabaseUser.user_metadata?.full_name as string | undefined) ||
+    (supabaseUser.user_metadata?.name as string | undefined) ||
+    null;
+  // console.log("displayName:", displayName);
+  const [created] = await db
+    .insert(users)
+    .values({
+      supabaseUid: supabaseUser.id,
+      email: supabaseUser.email ?? "",
+      name: displayName ?? null,
+    })
+    .returning();
+  // console.log("created user:", created);
+  return created ?? null;
+}
 
 export async function getAuthenticatedUser(req?: Request): Promise<AppUser | null> {
-  console.log("[auth] getAuthenticatedUser called. req present?", !!req);
-  const cookieStore = await cookies();
-  console.log("[auth] cookieStore", cookieStore);
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+  // console.log("req provided to getAuthenticatedUser:", req);
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   if (!supabaseUrl || !supabaseAnonKey) return null;
+  // 1) If we received a Request with an Authorization header, use that token.
 
-  const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
+  if (req) {
+    const authHeader = req.headers.get("authorization") || req.headers.get("Authorization");
+    // console.log("authHeader:", authHeader);
+    const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : authHeader ?? null;
+    console.log("token:", token);
+    if (token) {
+      const client = createClient(supabaseUrl, supabaseAnonKey);
+      const { data } = await client.auth.getUser(token);
+      // console.log("data hai ye wala ", data);
+      // console.log("data.user hai ye wala ", data.user);
+      console.log("findOrCreateAppUser hai ye wala ", await findOrCreateAppUser(data.user ?? null));
+      return await findOrCreateAppUser(data.user ?? null);
+    }
+    else {
+      console.log("no token found");
+      // fallthrough: try cookie-based below if no bearer token
+    }
+    
+  }
+
+  // 2) Server-side cookie flow (Next.js server environment)
+  const cookieStore = await nextCookies();
+  const serverSupabase = createServerClient(supabaseUrl, supabaseAnonKey, {
     cookies: {
       get(name: string) {
         return cookieStore.get(name)?.value;
@@ -28,49 +77,6 @@ export async function getAuthenticatedUser(req?: Request): Promise<AppUser | nul
       },
     },
   });
-
-  let { data: { user } } = await supabase.auth.getUser();
-  if (!user && req) {
-    const bearer = req.headers.get("authorization") || req.headers.get("Authorization");
-    console.log("This is the bearer", bearer);
-    const token = bearer?.startsWith("Bearer ") ? bearer.slice(7) : undefined;
-    console.log("This is the token", token);
-    if (token) {
-      const browserClient = createClient(supabaseUrl, supabaseAnonKey);
-      const { data } = await browserClient.auth.getUser(token);
-      console.log("This is the culprit, token", data);
-      user = data.user ?? null;
-      console.log("This is the user", user);
-    }
-  }
-  if (!user) return null;
-
-  const authUser = user;
-  // Find existing app user by Supabase UID
-  const existing = await db
-    .select()
-    .from(users)
-    .where(eq(users.supabaseUid, authUser.id))
-    .limit(1);
-
-  if (existing.length > 0) return existing[0];
-
-  // Create app user record on first login
-  const displayName =
-    (authUser.user_metadata?.full_name as string | undefined) ||
-    (authUser.user_metadata?.name as string | undefined) ||
-    null;
-
-  const [created] = await db
-    .insert(users)
-    .values({
-      supabaseUid: authUser.id,
-      email: authUser.email ?? "",
-      name: displayName ?? null,
-    })
-    .returning();
-
-  return created ?? null;
+  const { data } = await serverSupabase.auth.getUser();
+  return await findOrCreateAppUser(data.user ?? null);
 }
-
-
